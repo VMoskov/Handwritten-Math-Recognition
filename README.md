@@ -1,4 +1,4 @@
-Math Project
+Handwritten Math Recognition
 ========
 
 Author/Contact: Harold Mouchère (harold.mouchere@univ-nantes.fr)
