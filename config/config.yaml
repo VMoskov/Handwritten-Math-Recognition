@@ -1,0 +1,55 @@
+system:
+  device: "cpu"       # "auto", "cuda", "mps", or "cpu"
+  save_dir: "weights/"
+
+data:
+  detection_root: "dataset/CROHME/FullExpressionsDataset/CROHME2019_train_png"
+  classification_root: "dataset/CROHME/TrainingSymbolsDataset/"
+
+  num_meta_classes: 4   # Background + Digit + Letter + Operator
+  num_symbol_classes: 100
+  synthetic_samples: 100000
+
+  batch_size_detector: 4
+  batch_size_classifier: 512
+  batch_size_translator: 128
+
+model:
+  detector_weights: /Users/veca/FER/erasmus/courses/deep learning/project/weights/detector/best_detector_0.2961.pth #null 
+  classifier_weights: null
+  translator_weights: null
+
+training:
+  detector:
+    epochs: 20
+    patience: 5
+    optimizer:
+      lr: 0.005
+      momentum: 0.9
+      weight_decay: 0.0005
+    scheduler:
+      mode: "min"
+      factor: 0.1
+      patience: 2
+  
+  classifier:
+    epochs: 20
+    patience: 5
+    optimizer:
+      lr: 0.0025
+      weight_decay: 0.0001
+    scheduler:
+      mode: "min"
+      factor: 0.1
+      patience: 2
+
+  translator:
+    epochs: 30
+    patience: 10
+    optimizer:
+      lr: 0.0001
+      weight_decay: 0.0001
+    scheduler:
+      mode: "min"
+      factor: 0.5
+      patience: 3
