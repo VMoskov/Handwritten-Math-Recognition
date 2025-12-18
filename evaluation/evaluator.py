@@ -7,8 +7,7 @@ class ObjectDetectionEvaluator:
     def __init__(self, class_names, device):
         '''
         Args:
-            class_names (list): List of class names
-                                Index 0 should be background.
+            class_names (list): List of class names. Index 0 must be background.
             device (torch.device): CPU or Cuda.
         '''
         self.device = device
@@ -18,42 +17,42 @@ class ObjectDetectionEvaluator:
         
         self.iou_sums = {i: 0.0 for i in range(len(class_names))}
         self.gt_counts = {i: 0 for i in range(len(class_names))}
+        
+        self.total_detected_boxes = 0
+        self.correct_classified_boxes = 0
 
     def update(self, predictions, targets):
         '''
         Args:
-            predictions (list): List of dicts from model output.
-            targets (list): List of dicts from dataloader.
+            predictions (list): List of dicts with keys 'boxes', 'labels', 'scores'.
+            targets (list): List of dicts with keys 'boxes', 'labels'.
         '''
         preds_formatted = [{k: v.to(self.device) for k, v in p.items()} for p in predictions]
         targets_formatted = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+        
         self.map_metric.update(preds_formatted, targets_formatted)
 
         for pred, target in zip(preds_formatted, targets_formatted):
-            self._update_iou_stats(pred, target)
+            self._update_iou_and_accuracy(pred, target)
 
-    def _update_iou_stats(self, pred, target):
+    def _update_iou_and_accuracy(self, pred, target):
         '''
-        Calculates the best IoU for each Ground Truth box.
+        Calculates mIoU (tightness) and Classification Accuracy.
         '''
-        p_boxes = pred['boxes']
-        p_labels = pred['labels']
-        t_boxes = target['boxes']
-        t_labels = target['labels']
+        p_boxes, p_labels = pred['boxes'], pred['labels']
+        t_boxes, t_labels = target['boxes'], target['labels']
 
         if len(t_boxes) == 0:
             return
 
-        # no predictions -> IoU = 0
+        # handle empty predictions
         if len(p_boxes) == 0:
             for label in t_labels:
-                lbl = label.item()
-                self.gt_counts[lbl] += 1
+                self.gt_counts[label.item()] += 1
             return
 
         ious = box_iou(p_boxes, t_boxes)
 
-        # find best IoU for each GT box
         for t_idx, t_label in enumerate(t_labels):
             lbl = t_label.item()
             self.gt_counts[lbl] += 1
@@ -62,11 +61,21 @@ class ObjectDetectionEvaluator:
             
             if len(same_class_indices) > 0:
                 class_ious = ious[same_class_indices, t_idx]
-                best_iou = class_ious.max().item()
+                best_iou = class_ious.max().item()  # get best IoU for this GT box
                 self.iou_sums[lbl] += best_iou
-            else:  
-                # no prediction of the correct class -> IoU = 0
-                self.iou_sums[lbl] += 0.0
+
+        best_iou_vals, best_iou_indices = ious.max(dim=0)
+        
+        for t_idx, iou in enumerate(best_iou_vals):
+            if iou > 0.5:  # detection threshold
+                self.total_detected_boxes += 1
+                
+                pred_idx = best_iou_indices[t_idx]
+                pred_lbl = p_labels[pred_idx]
+                gt_lbl = t_labels[t_idx]
+                
+                if pred_lbl == gt_lbl:
+                    self.correct_classified_boxes += 1
 
     def compute(self):
         map_results = self.map_metric.compute()
@@ -76,36 +85,36 @@ class ObjectDetectionEvaluator:
         total_gt_count = 0
         
         for i, name in enumerate(self.class_names):
-            if i == 0: continue # skip background
+            if i == 0: continue  # skip background
             
             count = self.gt_counts[i]
             if count > 0:
                 avg_iou = self.iou_sums[i] / count
                 iou_results[f'IoU/{name}'] = avg_iou
-                
                 total_iou_sum += self.iou_sums[i]
                 total_gt_count += count
             else:
-                iou_results[f'IoU/{name}'] = -1.0  # -1 if no GT instances
+                iou_results[f'IoU/{name}'] = -1.0  # no GT found
         
-        if total_gt_count > 0:
-            iou_results['mIoU'] = total_iou_sum / total_gt_count
-        else:
-            iou_results['mIoU'] = 0.0
+        mean_iou = total_iou_sum / total_gt_count if total_gt_count > 0 else 0.0
 
-        # Combine results
-        final_results = {
-            'mAP': map_results['map'],
-            'mAP@75': map_results['map_75'],
-            'mAP@50': map_results['map_50'],
-            'mIoU': iou_results['mIoU'],
-            'per_class_iou': iou_results,
-            'per_class_map': map_results['map_per_class']
+        if self.total_detected_boxes > 0:
+            clf_acc = self.correct_classified_boxes / self.total_detected_boxes
+        else:
+            clf_acc = 0.0
+
+        return {
+            'mAP': map_results['map'].item(),
+            'mAP@50': map_results['map_50'].item(),
+            'mIoU': mean_iou,
+            'Accuracy': clf_acc,
+            'per_class_map': map_results['map_per_class'],
+            'per_class_iou': iou_results
         }
-        
-        return final_results
 
     def reset(self):
         self.map_metric.reset()
         self.iou_sums = {i: 0.0 for i in range(len(self.class_names))}
         self.gt_counts = {i: 0 for i in range(len(self.class_names))}
+        self.total_detected_boxes = 0
+        self.correct_classified_boxes = 0
