@@ -107,53 +107,55 @@ class PipelineModel(nn.Module):
         valid_indices = []
         h_img, w_img = img.shape[1], img.shape[2]
         
-        # Margin to add around the box (prevents cutting off edges)
-        margin = 4 
+        # margin to prevent cutting off edges
+        margin = 8 
         
         for b_idx, box in enumerate(boxes):
             x1, y1, x2, y2 = box.int().tolist()
             
-            # 1. Add Margin & Clip to Image Bounds
             x1 = max(0, x1 - margin)
             y1 = max(0, y1 - margin)
             x2 = min(w_img, x2 + margin)
             y2 = min(h_img, y2 + margin)
             
-            # Skip invalid boxes
+            # skip invalid boxes
             if x2 - x1 < 2 or y2 - y1 < 2: 
                 continue
                 
-            crop = img[:, y1:y2, x1:x2] # Shape: (C, H, W)
+            crop = img[:, y1:y2, x1:x2]  # shape: (C, H, W)
             
-            # 2. Pad to Square (Preserve Aspect Ratio)
             c, h, w = crop.shape
             max_dim = max(h, w)
             
             pad_h = (max_dim - h) // 2
             pad_w = (max_dim - w) // 2
             
-            # Determine background color automatically (median of corners) or assume 1.0/0.0
-            # Heuristic: The image is likely background-dominant. Max value usually works for white background.
             bg_val = crop.max() 
             
-            # Pad: (left, right, top, bottom)
-            # We add the extra pixel to the second side if odd padding is needed
             padding = (pad_w, max_dim - w - pad_w, pad_h, max_dim - h - pad_h)
             
             crop_square = F.pad(crop, padding, value=bg_val)
             
-            # 3. Resize to Target Size (e.g. 32x32)
-            # Now that it is square, resizing won't distort the shape
             crop_resized = F.interpolate(
                 crop_square.unsqueeze(0), 
                 size=self.classifier_input_size,
                 mode='bilinear', 
                 align_corners=False
             )
+
+            # contrast normalization
+            min_val = crop_resized.min().item()
+            max_val = crop_resized.max().item()
+            if max_val - min_val > 1e-5:
+                crop_resized = (crop_resized - min_val) / (max_val - min_val)
+
+            # gamma correction to amplify strokes
+            gamma = 0.5
+            crop_resized = torch.pow(crop_resized, gamma)
             
             vutils.save_image(crop_resized, f"debug/debug_crop_{b_idx}.png", normalize=True)
 
-            # Normalize
+            # normalize
             crop_norm = (crop_resized - self.clf_mean) / self.clf_std
             crops.append(crop_norm)
             valid_indices.append(b_idx)
@@ -164,39 +166,29 @@ class PipelineModel(nn.Module):
         '''
         Helper to run the greedy decode loop for one image's detections.
         '''
-        # A. Prepare Input Vector (Batch=1, N_Boxes, 5)
         translator_input = self._prepare_translator_input(boxes, labels, img_w, img_h)
         translator_input = translator_input.unsqueeze(0).to(device) # Add batch dim
         
-        # B. Greedy Decode Loop
         curr_tokens = torch.tensor([[self.START_IDX]], device=device)
         generated_str = []
         
-        # We disable gradients for the loop since this is pure inference
         with torch.no_grad():
             for _ in range(max_seq_len):
-                # Forward pass
                 logits = self.translation_head(translator_input, curr_tokens)
                 
-                # Get prediction for last token
                 next_token_logits = logits[:, -1, :]
                 next_token_id = torch.argmax(next_token_logits, dim=-1).item()
                 
-                # Stop if END token
                 if next_token_id == self.END_IDX:
                     break
                     
-                # Append to sequence
                 curr_tokens = torch.cat([curr_tokens, torch.tensor([[next_token_id]], device=device)], dim=1)
                 
-                # Decode ID -> String
                 token_str = self.id_to_token.get(next_token_id, "")
                 
-                # Filter out special tokens from final string
                 if token_str not in self.special_tokens:
                     generated_str.append(token_str)
         
-        # Return space-separated string
         return " ".join(generated_str)
 
     def _prepare_translator_input(self, boxes, labels, img_w, img_h):
@@ -207,19 +199,17 @@ class PipelineModel(nn.Module):
         for box, label in zip(boxes, labels):
             x1, y1, x2, y2 = box.float()
             
-            # Calculate Center + Width/Height
             w = x2 - x1
             h = y2 - y1
             cx = x1 + (w / 2)
             cy = y1 + (h / 2)
             
-            # Normalize (0.0 - 1.0)
             norm_cx = cx / img_w
             norm_cy = cy / img_h
             norm_w = w / img_w
             norm_h = h / img_h
             
-            # [Label, x, y, w, h]
+            # [label, x, y, w, h]
             vectors.append([float(label), norm_cx, norm_cy, norm_w, norm_h])
             
         return torch.tensor(vectors)
