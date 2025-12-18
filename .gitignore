@@ -17,3 +17,5 @@ debug/
 .vscode/
 data_png_data/
 old_subject/
+subject/
+notebook.ipynb
